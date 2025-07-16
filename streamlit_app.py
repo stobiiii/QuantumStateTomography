@@ -1,151 +1,104 @@
+
+
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import plotly.graph_objects as go
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+st.set_page_config(layout="wide")
+st.title("Quantum State Tomography")
+
+# --- Hilfsfunktionen ---
+def generate_density_matrix(bloch_vector):
+    x, y, z = bloch_vector
+    I = np.eye(2)
+    pauli = [np.array([[0, 1], [1, 0]]),  # X
+             np.array([[0, -1j], [1j, 0]]),  # Y
+             np.array([[1, 0], [0, -1]])]  # Z
+    rho = 0.5 * (I + x * pauli[0] + y * pauli[1] + z * pauli[2])
+    return rho
+
+def plot_bloch_vector(vec):
+    # Kugel Koordinaten
+    u = np.linspace(0, 2 * np.pi, 60)
+    v = np.linspace(0, np.pi, 30)
+    x_sphere = np.outer(np.cos(u), np.sin(v))
+    y_sphere = np.outer(np.sin(u), np.sin(v))
+    z_sphere = np.outer(np.ones(np.size(u)), np.cos(v))
+
+    fig = go.Figure()
+
+    # Oberfläche
+    fig.add_trace(go.Surface(
+        x=x_sphere, y=y_sphere, z=z_sphere,
+        opacity=0.2, colorscale='Blues', showscale=False
+    ))
+
+    # Achsen
+    for axis, color in zip(['x', 'y', 'z'], ['red', 'green', 'blue']):
+        a = dict(x=[-1.2 if axis == 'x' else 0, 1.2 if axis == 'x' else 0],
+                 y=[-1.2 if axis == 'y' else 0, 1.2 if axis == 'y' else 0],
+                 z=[-1.2 if axis == 'z' else 0, 1.2 if axis == 'z' else 0])
+        fig.add_trace(go.Scatter3d(x=a['x'], y=a['y'], z=a['z'], mode='lines', line=dict(color=color, width=4)))
+
+    # Vektor
+    fig.add_trace(go.Scatter3d(
+        x=[0, vec[0]], y=[0, vec[1]], z=[0, vec[2]],
+        mode='lines+markers+text',
+        line=dict(color='black', width=8),
+        marker=dict(size=6, color='black'),
+        text=["", "Bloch-Vektor"],
+        textposition='top center'
+    ))
+
+    fig.update_layout(scene=dict(
+        xaxis=dict(title='X', range=[-1.5, 1.5]),
+        yaxis=dict(title='Y', range=[-1.5, 1.5]),
+        zaxis=dict(title='Z', range=[-1.5, 1.5]),
+        aspectmode='cube'
+    ), margin=dict(l=0, r=0, t=40, b=0))
+
+    return fig
+
+# --- Session State für Bloch-Vektor ---
+if "bloch_vector" not in st.session_state:
+    st.session_state.bloch_vector = [0.0, 0.0, 1.0]
+
+def randomize_valid_bloch_vector():
+    # Zufälliger Vektor im Einheitsball (r <= 1)
+    while True:
+        vec = np.random.uniform(-1, 1, 3)
+        if np.linalg.norm(vec) <= 1.0:
+            st.session_state.bloch_vector = vec
+            break
+
+# --- UI: Slider + Randomizer ---
+col1, col2 = st.columns([3, 1])
+with col1:
+    x = st.slider("⟨X⟩", min_value=-1.0, max_value=1.0, value=st.session_state.bloch_vector[0], step=0.01)
+    y = st.slider("⟨Y⟩", min_value=-1.0, max_value=1.0, value=st.session_state.bloch_vector[1], step=0.01)
+    z = st.slider("⟨Z⟩", min_value=-1.0, max_value=1.0, value=st.session_state.bloch_vector[2], step=0.01)
+    bloch_vector = np.array([x, y, z])
+    if np.linalg.norm(bloch_vector) <= 1.0:
+        st.session_state.bloch_vector = bloch_vector
+    else:
+        st.warning("Die Länge des Vektors darf maximal 1 sein, sonst ist der Zustand nicht physikalisch!")
+
+with col2:
+    if st.button("🔀 Zufälliger Zustand"):
+        randomize_valid_bloch_vector()
+
+# --- Dichtematrix anzeigen ---
+rho = generate_density_matrix(st.session_state.bloch_vector)
+st.markdown("### Dichtematrix ρ")
+rho_real = np.round(rho.real, 3)
+rho_imag = np.round(rho.imag, 3)
+st.latex(r"\rho = " + 
+         r"\begin{bmatrix}"
+         + f"{rho_real[0,0]} + {rho_imag[0,0]}i & {rho_real[0,1]} + {rho_imag[0,1]}i \\\\"
+         + f"{rho_real[1,0]} + {rho_imag[1,0]}i & {rho_real[1,1]} + {rho_imag[1,1]}i"
+         + r"\end{bmatrix}"
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# --- Blochkugel Plot ---
+fig = plot_bloch_vector(st.session_state.bloch_vector)
+st.plotly_chart(fig, use_container_width=True)
